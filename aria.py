@@ -1,55 +1,80 @@
-import curses
 import os
-import random
-from curses import wrapper
-from curses.textpad import Textbox, rectangle
-import time
+import secrets
+from typing import List, Tuple
 
-# Cypher Functions
-def to_int(byte_array):
-    assert len(byte_array) == 4, f"to_int: byte_array length must be 4, got {len(byte_array)}"
+# ---------------------------
+# Conversion Utilities
+# ---------------------------
+def to_int(byte_array: List[int]) -> int:
+    """
+    Convert a 4-byte array to a 32-bit integer.
+    """
+    if len(byte_array) != 4:
+        raise ValueError(f"to_int: la longueur de byte_array doit être 4, obtenu {len(byte_array)}")
     return (byte_array[0] << 24) | (byte_array[1] << 16) | (byte_array[2] << 8) | byte_array[3]
 
-def to_byte_array(integer):
+def to_byte_array(integer: int) -> List[int]:
+    """
+    Convert a 32-bit integer to a 4-byte array.
+    """
     return [(integer >> 24) & 0xff, (integer >> 16) & 0xff, (integer >> 8) & 0xff, integer & 0xff]
 
-# Functions ARIA
-def m(t):
-    return 0x00010101 * ((t >> 24) & 0xff) ^ 0x01000101 * ((t >> 16) & 0xff) ^ \
-           0x01010001 * ((t >> 8) & 0xff) ^ 0x01010100 * (t & 0xff)
+# ---------------------------
+# ARIA Core Functions
+# ---------------------------
+def m(t: int) -> int:
+    """
+    Perform the multiplication function for ARIA.
+    """
+    return (0x00010101 * ((t >> 24) & 0xff) ^
+            0x01000101 * ((t >> 16) & 0xff) ^
+            0x01010001 * ((t >> 8) & 0xff) ^
+            0x01010100 * (t & 0xff))
 
-def badc(t):
+def badc(t: int) -> int:
+    """
+    Swap adjacent bytes.
+    """
     return ((t << 8) & 0xff00ff00) ^ ((t >> 8) & 0x00ff00ff)
 
-def cdab(t):
+def cdab(t: int) -> int:
+    """
+    Swap pairs of bytes.
+    """
     return ((t << 16) & 0xffff0000) ^ ((t >> 16) & 0x0000ffff)
 
-def dcba(t):
-    return (t & 0x000000ff) << 24 ^ (t & 0x0000ff00) << 8 ^ (t & 0x00ff0000) >> 8 ^ (t & 0xff000000) >> 24
+def dcba(t: int) -> int:
+    """
+    Reverse the byte order.
+    """
+    return ((t & 0x000000ff) << 24) ^ ((t & 0x0000ff00) << 8) ^ ((t & 0x00ff0000) >> 8) ^ ((t & 0xff000000) >> 24)
 
-def gsrk(x, y, rot):
-    assert len(x) == 4 and len(y) == 4, f"gsrk: Input sizes must be 4, got x={len(x)}, y={len(y)}"
+def gsrk(x: List[int], y: List[int], rot: int) -> List[int]:
+    """
+    Generate subkeys using a rotation and mix function.
+    """
+    if len(x) != 4 or len(y) != 4:
+        raise ValueError(f"gsrk: la taille des entrées doit être 4, obtenu x={len(x)}, y={len(y)}")
     q = 4 - (rot // 32)
     r = rot % 32
     s = 32 - r
 
-    print(f"gsrk: before x={x}, y={y}, q={q}, r={r}, s={s}")
-
-    result = [
-        x[0] ^ (y[(q) % 4] >> r) ^ (y[(q + 3) % 4] << s),
-        x[1] ^ (y[(q + 1) % 4] >> r) ^ (y[(q) % 4] << s),
-        x[2] ^ (y[(q + 2) % 4] >> r) ^ (y[(q + 1) % 4] << s),
-        x[3] ^ (y[(q + 3) % 4] >> r) ^ (y[(q + 2) % 4] << s)
+    return [
+        x[0] ^ ((y[q % 4] >> r) & 0xffffffff) ^ ((y[(q + 3) % 4] << s) & 0xffffffff),
+        x[1] ^ ((y[(q + 1) % 4] >> r) & 0xffffffff) ^ ((y[q % 4] << s) & 0xffffffff),
+        x[2] ^ ((y[(q + 2) % 4] >> r) & 0xffffffff) ^ ((y[(q + 1) % 4] << s) & 0xffffffff),
+        x[3] ^ ((y[(q + 3) % 4] >> r) & 0xffffffff) ^ ((y[(q + 2) % 4] << s) & 0xffffffff)
     ]
 
-    print(f"gsrk: after = {result}")
-    return result
-
-def diff(i):
-    assert len(i) == 4, f"diff: Input size must be 4, got {len(i)}"
+def diff(i: List[int]) -> List[int]:
+    """
+    Apply the diffusion function to a block represented as a list of four 32-bit integers.
+    """
+    if len(i) != 4:
+        raise ValueError(f"diff: la taille d'entrée doit être 4, obtenu {len(i)}")
     t0, t1, t2, t3 = m(i[0]), m(i[1]), m(i[2]), m(i[3])
-    print(f"diff: After m = {[t0, t1, t2, t3]}")
 
+    # First round of mixing
     t1 ^= t2
     t2 ^= t3
     t0 ^= t1
@@ -57,8 +82,12 @@ def diff(i):
     t2 ^= t0
     t1 ^= t2
 
-    t1, t2, t3 = badc(t1), cdab(t2), dcba(t3)
+    # Apply byte reordering functions
+    t1 = badc(t1)
+    t2 = cdab(t2)
+    t3 = dcba(t3)
 
+    # Second round of mixing
     t1 ^= t2
     t2 ^= t3
     t0 ^= t1
@@ -66,51 +95,41 @@ def diff(i):
     t2 ^= t0
     t1 ^= t2
 
-    result = [t0, t1, t2, t3]
-    assert len(result) == 4, f"diff: Output size must be 4, got {len(result)}"
-    print(f"diff: Final result = {result}")
-    return result
+    return [t0, t1, t2, t3]
 
-def do_enc_key_setup(mk, key_bits):
+def do_enc_key_setup(mk: List[int], key_bits: int) -> Tuple[List[int], List[int], List[int]]:
+    """
+    Set up the encryption keys using the master key.
+    """
+    # Key rotation constants for different key sizes
     krk = [
         [0x517cc1b7, 0x27220a94, 0xfe13abe8, 0xfa9a6ee0],
         [0x6db14acc, 0x9e21c820, 0xff28b1d5, 0xef5de2b0],
         [0xdb92371d, 0x2126e970, 0x03249775, 0x04e8c90e]
     ]
-
-    # Master key in blocks of 32 bits
+    # Convert master key bytes to 32-bit words
     w = [to_int(mk[i:i+4]) for i in range(0, len(mk), 4)]
-    print(f"do_enc_key_setup: w = {w}")
-
     q = (key_bits - 128) // 64
     t = [w[i] ^ krk[q][i] for i in range(4)]
-    print(f"do_enc_key_setup: t = {t}")
 
-    # Intermediate key generation
     k0 = t
     k1 = diff(t)
     k2 = diff(diff(t))
 
-    assert len(k1) == 4, f"do_enc_key_setup: k1 length must be 4, got {len(k1)}"
-    assert len(k2) == 4, f"do_enc_key_setup: k2 length must be 4, got {len(k2)}"
-
+    # Key mixing steps
     k1 = [k1[i] ^ k0[i] for i in range(4)]
     k2 = [k2[i] ^ k1[i] for i in range(4)]
-
-    print(f"do_enc_key_setup: k0 = {k0}, k1 = {k1}, k2 = {k2}")
     return k0, k1, k2
 
-
-def do_crypt(in_blk, key, rounds):
-    assert len(in_blk) == 16, f"do_crypt: Input block size must be 16, got {len(in_blk)}"
+def do_crypt(in_blk: List[int], key: Tuple[List[int], List[int], List[int]], rounds: int) -> List[int]:
+    """
+    Encrypt or decrypt a 16-byte block using the provided key schedule.
+    """
+    if len(in_blk) != 16:
+        raise ValueError(f"do_crypt: la taille du bloc d'entrée doit être 16, obtenu {len(in_blk)}")
     k0, k1, k2 = key
 
-    print(f"do_crypt: in_blk = {in_blk}")
-    print(f"do_crypt: k1 = {k1}, k2 = {k2}")
-
-    assert len(k1) == 4, f"do_crypt: k1 length must be 4, got {len(k1)}"
-    assert len(k2) == 4, f"do_crypt: k2 length must be 4, got {len(k2)}"
-
+    # Initial key addition
     x = [
         to_int(in_blk[0:4]) ^ k0[0],
         to_int(in_blk[4:8]) ^ k0[1],
@@ -118,460 +137,226 @@ def do_crypt(in_blk, key, rounds):
         to_int(in_blk[12:16]) ^ k0[3]
     ]
 
-    print(f"do_crypt: x after initial xor = {x}")
-
-    for r in range(rounds - 1):
+    # Rounds of diffusion and subkey mixing
+    for _ in range(rounds - 1):
         x = diff(gsrk(diff(x), k1, 19))
         x = diff(gsrk(diff(x), k2, 31))
-
     x = diff(gsrk(diff(x), k1, 19))
 
-    out_blk = [
-        (x[0] >> 24) & 0xff, (x[0] >> 16) & 0xff, (x[0] >> 8) & 0xff, x[0] & 0xff,
-        (x[1] >> 24) & 0xff, (x[1] >> 16) & 0xff, (x[1] >> 8) & 0xff, x[1] & 0xff,
-        (x[2] >> 24) & 0xff, (x[2] >> 16) & 0xff, (x[2] >> 8) & 0xff, x[2] & 0xff,
-        (x[3] >> 24) & 0xff, (x[3] >> 16) & 0xff, (x[3] >> 8) & 0xff, x[3] & 0xff
-    ]
-
-    print(f"do_crypt: out_blk = {out_blk}")
+    # Convert result back to a byte array
+    out_blk: List[int] = []
+    for num in x:
+        out_blk.extend(to_byte_array(num))
     return out_blk
 
-# Padding and validation utilities
-def pkcs7_pad(data, block_size=16):
+# ---------------------------
+# Padding and Block Size Validation
+# ---------------------------
+def pkcs7_pad(data: bytes, block_size: int = 16) -> bytes:
+    """
+    Apply PKCS#7 padding to data.
+    """
     pad_len = block_size - (len(data) % block_size)
     return data + bytes([pad_len] * pad_len)
 
-def pkcs7_unpad(padded_data):
+def pkcs7_unpad(padded_data: bytes) -> bytes:
+    """
+    Remove PKCS#7 padding.
+    """
     pad_len = padded_data[-1]
     if pad_len < 1 or pad_len > len(padded_data):
-        raise ValueError("Invalid padding")
+        raise ValueError("Padding invalide")
     if not all(p == pad_len for p in padded_data[-pad_len:]):
-        raise ValueError("Invalid padding structure")
+        raise ValueError("Structure de padding invalide")
     return padded_data[:-pad_len]
 
-def validate_block_size(data, block_size=16):
+def validate_block_size(data: bytes, block_size: int = 16) -> None:
+    """
+    Validate that data length is a multiple of the block size.
+    """
     if len(data) % block_size != 0:
-        raise ValueError("Data is not properly aligned to block size")
+        raise ValueError("Les données ne sont pas alignées sur la taille du bloc")
 
-# Key generation utility
-def generate_key(key_bits=128):
+# ---------------------------
+# Key Generation
+# ---------------------------
+def generate_key(key_bits: int = 128) -> List[int]:
+    """
+    Generate a cryptographically secure random key.
+    """
     if key_bits not in [128, 192, 256]:
-        raise ValueError("Key size must be 128, 192, or 256 bits")
-    return [random.randint(0, 255) for _ in range(key_bits // 8)]
+        raise ValueError("La taille de clé doit être 128, 192 ou 256 bits")
+    key_length = key_bits // 8
+    return list(secrets.token_bytes(key_length))
 
-def aria_encrypt(plain_text, master_key, key_bits=128):
-    try:
-        expected_key_length = key_bits // 8
-        assert len(master_key) == expected_key_length, f"aria_encrypt: master_key length must be {expected_key_length}, got {len(master_key)}"
+# ---------------------------
+# Encryption and Decryption Functions
+# ---------------------------
+def aria_encrypt(plain_text: str, master_key: List[int], key_bits: int = 128, rounds: int = 16) -> bytes:
+    """
+    Encrypt a plaintext string using ARIA.
+    """
+    expected_key_length = key_bits // 8
+    if len(master_key) != expected_key_length:
+        raise ValueError(f"La longueur de master_key doit être {expected_key_length}, obtenu {len(master_key)}")
+    
+    # Encode if input is string and pad
+    if isinstance(plain_text, str):
+        plain_text = plain_text.encode('utf-8')
+    plain_text = pkcs7_pad(plain_text)
 
-        if isinstance(plain_text, str):
-            plain_text = plain_text.encode('utf-8')
-        plain_text = pkcs7_pad(plain_text)
+    key_schedule = do_enc_key_setup(master_key, key_bits)
+    blocks = [plain_text[i:i+16] for i in range(0, len(plain_text), 16)]
+    encrypted_blocks = [bytes(do_crypt(list(block), key_schedule, rounds)) for block in blocks]
+    return b''.join(encrypted_blocks)
 
-        key_schedule = do_enc_key_setup(master_key, key_bits)
-        blocks = [plain_text[i:i+16] for i in range(0, len(plain_text), 16)]
+def aria_decrypt(cipher_text: bytes, master_key: List[int], key_bits: int = 128, rounds: int = 16) -> str:
+    """
+    Decrypt a ciphertext (in bytes) using ARIA.
+    """
+    validate_block_size(cipher_text)
+    key_schedule = do_enc_key_setup(master_key, key_bits)
+    blocks = [cipher_text[i:i+16] for i in range(0, len(cipher_text), 16)]
+    decrypted_blocks = [bytes(do_crypt(list(block), key_schedule, rounds)) for block in blocks]
+    decrypted_data = b''.join(decrypted_blocks)
+    return pkcs7_unpad(decrypted_data).decode('utf-8')
 
-        encrypted_blocks = []
-        for block in blocks:
-            assert len(block) == 16
-            encrypted_block = bytes(do_crypt(list(block), key_schedule, 16))
-            encrypted_blocks.append(encrypted_block)
-
-        return b''.join(encrypted_blocks)
-    except Exception as e:
-        raise RuntimeError(f"Encryption failed: {e}")
-
-def aria_decrypt(cipher_text, master_key, key_bits=128):
-    try:
-        validate_block_size(cipher_text)
-        key_schedule = do_enc_key_setup(master_key, key_bits)
-        blocks = [cipher_text[i:i+16] for i in range(0, len(cipher_text), 16)]
-
-        decrypted_blocks = []
-        for block in blocks:
-            assert len(block) == 16
-            decrypted_block = bytes(do_crypt(list(block), key_schedule, 16))
-            decrypted_blocks.append(decrypted_block)
-
-        decrypted_data = b''.join(decrypted_blocks)
-        return pkcs7_unpad(decrypted_data).decode('utf-8')
-    except Exception as e:
-        raise RuntimeError(f"Decryption failed: {e}")
-
-def encrypt_file(input_file, output_file, master_key, key_bits=128):
+def encrypt_file(input_file: str, output_file: str, master_key: List[int], key_bits: int = 128, rounds: int = 16) -> bool:
+    """
+    Encrypt a file using ARIA.
+    """
     try:
         with open(input_file, "rb") as f:
             data = f.read()
-
         padded_data = pkcs7_pad(data)
         key_schedule = do_enc_key_setup(master_key, key_bits)
         blocks = [padded_data[i:i+16] for i in range(0, len(padded_data), 16)]
-        encrypted_blocks = [bytes(do_crypt(list(block), key_schedule, 16)) for block in blocks]
+        encrypted_blocks = [bytes(do_crypt(list(block), key_schedule, rounds)) for block in blocks]
 
         with open(output_file, "wb") as f:
             f.write(b''.join(encrypted_blocks))
         return True
     except Exception as e:
-        raise RuntimeError(f"File encryption failed: {e}")
+        raise RuntimeError(f"Échec de l'encryption du fichier : {e}")
 
-
-def decrypt_file(input_file, output_file, master_key, key_bits=128):
+def decrypt_file(input_file: str, output_file: str, master_key: List[int], key_bits: int = 128, rounds: int = 16) -> bool:
+    """
+    Decrypt a file using ARIA.
+    """
     try:
         with open(input_file, "rb") as f:
             data = f.read()
-
         validate_block_size(data)
         key_schedule = do_enc_key_setup(master_key, key_bits)
         blocks = [data[i:i+16] for i in range(0, len(data), 16)]
-        decrypted_blocks = [bytes(do_crypt(list(block), key_schedule, 16)) for block in blocks]
+        decrypted_blocks = [bytes(do_crypt(list(block), key_schedule, rounds)) for block in blocks]
         decrypted_data = b''.join(decrypted_blocks)
-
         unpadded_data = pkcs7_unpad(decrypted_data)
+
         with open(output_file, "wb") as f:
             f.write(unpadded_data)
         return True
     except Exception as e:
-        raise RuntimeError(f"File decryption failed: {e}")
+        raise RuntimeError(f"Échec du déchiffrement du fichier : {e}")
 
+# ---------------------------
+# Command-Line Interface
+# ---------------------------
+def main() -> None:
+    print("===== Système d'encryption ARIA =====")
+    print("Crédits : Inspiré par les auteurs du cipher ARIA (2003)")
+    print("======================================\n")
 
-def display_credits(stdscr):
-    # Première page : TheBlackBird
-    page_one = r"""
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿⡟⠋⢻⣷⣄⡀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣤⣾⣿⣷⣿⣿⣿⣿⣿⣶⣾⣿⣿⠿⠿⠿⠶⠄⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠉⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡟⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠃⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⣿⣿⣿⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⣿⣿⣿⣿⣿⣿⠟⠻⣧⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⣿⣿⣿⣿⣿⣿⣆⣤⠿⢶⣦⡀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⢰⣿⣿⣿⣿⣿⣿⣿⣿⡀⠀⠀⠀⠑⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠸⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠉⠙⠛⠋⠉⠉⠀⠀⠀
+    # Key selection or generation
+    print("Choisissez l'option pour la clé :")
+    print("1. Générer une clé (128 bits)")
+    print("2. Générer une clé (192 bits)")
+    print("3. Générer une clé (256 bits)")
+    print("4. Saisir une clé (hexadécimal)")
+    choice = input("Votre choix (1-4) : ").strip()
+    key_bits = 128
+    master_key: List[int] = []
 
-Done by TheBlackBird
-"""
-    # Deuxième page : Inspired by...
-    page_two = r"""
+    if choice in ['1', '2', '3']:
+        key_bits = [128, 192, 256][int(choice) - 1]
+        master_key = generate_key(key_bits)
+        print(f"Clé générée ({key_bits} bits) : {bytes(master_key).hex()}\n")
+    elif choice == '4':
+        key_hex = input("Entrez votre clé en format hexadécimal : ").strip()
+        master_key = list(bytes.fromhex(key_hex))
+        key_bits = len(master_key) * 8
+        print(f"Clé saisie ({key_bits} bits) : {key_hex}\n")
+    else:
+        print("Choix invalide.")
+        return
 
-ARIA Encryption System
-
-Inspired by the authors of the ARIA cipher:
-Daesung Kwon, Jaesung Kim, Sangwoo Park, Soo Hak Sung,
-Yaekwon Sohn, Jung Hwan Song, Yongjin Yeom, E-Joong Yoon, 
-Sangjin Lee, Jaewon Lee, Seongtaek Chee, Daewan Han, Jin Hong
-KISA, Korean National Security Research Institute
-
-New Block Cipher : ARIA , 2003
-
-"""
-
-    # Afficher la première page
-    stdscr.clear()
-    curses.start_color()
-    curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
-    GREEN = curses.color_pair(1)
-
-    for i, line in enumerate(page_one.split("\n")):
-        stdscr.addstr(5 + i, (curses.COLS - len(line)) // 2, line, GREEN)
-    stdscr.addstr(curses.LINES - 2, (curses.COLS - len("Press any key to continue...")) // 2, "Press any key to continue...", GREEN)
-    stdscr.refresh()
-    stdscr.getch()
-
-    # Afficher la deuxième page
-    stdscr.clear()
-    for i, line in enumerate(page_two.split("\n")):
-        stdscr.addstr(5 + i, (curses.COLS - len(line)) // 2, line, GREEN)
-    stdscr.addstr(curses.LINES - 2, (curses.COLS - len("Press any key to continue...")) // 2, "Press any key to continue...", GREEN)
-    stdscr.refresh()
-    stdscr.getch()
-
-
-class AriaInterface:
-    def __init__(self, stdscr):
-        self.stdscr = stdscr
-        self.height, self.width = stdscr.getmaxyx()
-        curses.start_color()
-        curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
-        curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_GREEN)
-        curses.init_pair(3, curses.COLOR_RED, curses.COLOR_BLACK)
-
-        self.GREEN = curses.color_pair(1)
-        self.SELECTED = curses.color_pair(2)
-        self.ERROR = curses.color_pair(3)
-        curses.curs_set(0)
-
-        self.logs = []
-        self.key = None  # Stocker la clé
-        self.key_bits = 128  # Par défaut 128 bits
-
-        # Création de fenêtres
-        self.menu_win = curses.newwin(self.height // 2, self.width, 0, 0)
-        self.logs_win = curses.newwin(self.height // 2 - 2, self.width, self.height // 2, 0)
-        self.status_win = curses.newwin(1, self.width, self.height - 1, 0)
-
-    def add_log(self, message, error=False):
-        prefix = "[ERROR]" if error else "[INFO]"
-        self.logs.append(f"{prefix} {message}")
-        if len(self.logs) > self.logs_win.getmaxyx()[0] - 2:
-            self.logs.pop(0)
-
-    def draw_logs(self):
-        self.logs_win.clear()
-        self.logs_win.border(0)
-        
-        # Titre centré
-        title = "LOGS"
-        max_width = self.logs_win.getmaxyx()[1] - 2
-        centered_x = (max_width - len(title)) // 2
-        self.logs_win.addstr(0, centered_x, title, self.GREEN)
-    
-        for i, log in enumerate(self.logs):
-            color = self.ERROR if "[ERROR]" in log else self.GREEN
-            self.logs_win.addstr(1 + i, 2, log[:max_width - 4], color)
-    
-        self.logs_win.refresh()
-
-    def draw_menu(self, options, current_option):
-        self.menu_win.clear()
-        self.menu_win.border(0)
-        title = [
-            "╔══════════════════════════════════════╗",
-            "║        ARIA ENCRYPTION SYSTEM        ║",
-            "║               [¬º-°]¬                ║",
-            "╚══════════════════════════════════════╝"
-        ]
-        for i, line in enumerate(title):
-            self.menu_win.addstr(i + 1, (self.width - len(line)) // 2, line, self.GREEN)
-
-        menu_y = 6
-        for i, option in enumerate(options):
-            x = (self.width - len(option)) // 2
-            style = self.SELECTED if i == current_option else self.GREEN
-            self.menu_win.addstr(menu_y + i * 2, x, option, style)
-        self.menu_win.refresh()
-
-    def set_status(self, status):
-        self.status_win.clear()
-        self.status_win.addstr(0, 2, f"Status: {status}".ljust(self.width - 4), self.GREEN)
-        self.status_win.refresh()
-
-    def select_key(self):
-        """Menu pour choisir ou générer la clé."""
-        key_options = ["Generate Key (128 bits)", "Generate Key (192 bits)", "Generate Key (256 bits)", "Enter Key (Hexadecimal)"]
-        current_option = 0
-
-        while True:
-            self.draw_menu(key_options, current_option)
-            self.set_status("Use UP/DOWN to navigate, ENTER to select.")
-
-            key = self.stdscr.getch()
-            if key == curses.KEY_UP and current_option > 0:
-                current_option -= 1
-            elif key == curses.KEY_DOWN and current_option < len(key_options) - 1:
-                current_option += 1
-            elif key == 10:  # Enter
-                if current_option < 3:  # Générer une clé
-                    self.key_bits = [128, 192, 256][current_option]
-                    self.key = generate_key(self.key_bits)
-                    self.add_log(f"Generated key ({self.key_bits} bits): {bytes(self.key).hex()}")
-                else:  # Saisir une clé manuellement
-                    self.set_status("Enter your key in hexadecimal format.")
-                    curses.curs_set(1)
-                    editwin = curses.newwin(1, self.width - 4, self.height // 2, 2)
-                    box = Textbox(editwin)
-                    box.edit()
-                    curses.curs_set(0)
-
-                    key_hex = box.gather().strip()
-                    self.key = bytes.fromhex(key_hex)
-                    self.key_bits = len(self.key) * 8
-                    self.add_log(f"Entered key ({self.key_bits} bits): {key_hex}")
-                break
-
-    def choose_action(self):
-        """Menu pour choisir entre chiffrement ou déchiffrement."""
-        options = ["Encrypt", "Decrypt"]
-        current_option = 0
-
-        while True:
-            self.draw_menu(options, current_option)
-            self.set_status("Use UP/DOWN to navigate, ENTER to select.")
-
-            key = self.stdscr.getch()
-            if key == curses.KEY_UP and current_option > 0:
-                current_option -= 1
-            elif key == curses.KEY_DOWN and current_option < len(options) - 1:
-                current_option += 1
-            elif key == 10:  # Enter
-                return options[current_option]
-
-    def choose_target(self):
-        """Menu pour choisir texte ou fichier."""
-        options = ["Text", "File"]
-        current_option = 0
-
-        while True:
-            self.draw_menu(options, current_option)
-            self.set_status("Use UP/DOWN to navigate, ENTER to select.")
-
-            key = self.stdscr.getch()
-            if key == curses.KEY_UP and current_option > 0:
-                current_option -= 1
-            elif key == curses.KEY_DOWN and current_option < len(options) - 1:
-                current_option += 1
-            elif key == 10:  # Enter
-                return options[current_option]
-
-    def main_loop(self):
-        while True:
-            self.select_key()  # Étape 1 : Choisir/générer une clé
-            action = self.choose_action()  # Étape 2 : Encrypt/Decrypt
-            target = self.choose_target()  # Étape 3 : Text/File
-
-            if action == "Encrypt" and target == "Text":
-                self.encrypt_text()
-            elif action == "Decrypt" and target == "Text":
-                self.decrypt_text()
-            elif action == "Encrypt" and target == "File":
-                self.encrypt_file()
-            elif action == "Decrypt" and target == "File":
-                self.decrypt_file()
-            else:
-                break
-
-    def encrypt_text(self):
-        self.set_status("Enter text to encrypt.")
-        curses.curs_set(1)
-        editwin = curses.newwin(1, self.width - 4, self.height // 2, 2)
-        box = Textbox(editwin)
-        box.edit()
-        curses.curs_set(0)
-
-        text = box.gather().strip()
-        self.add_log(f"Encrypting text: {text}")
-
+    # Choose the number of rounds
+    rounds_input = input("Entrez le nombre de tours à utiliser (entre 1 et 16, par défaut 16) : ").strip()
+    rounds = 16
+    if rounds_input:
         try:
-            if self.key is None:  # Générer une nouvelle clé si elle n'existe pas
-                self.key = generate_key(self.key_bits)
-                self.add_log(f"Key generated ({self.key_bits} bits): {bytes(self.key).hex()}")
+            rounds = int(rounds_input)
+            if rounds < 1 or rounds > 16:
+                print("Le nombre de tours doit être compris entre 1 et 16. Utilisation de 16 par défaut.")
+                rounds = 16
+        except ValueError:
+            print("Nombre de tours invalide, utilisation de 16 par défaut.")
 
-            encrypted = aria_encrypt(text, self.key, self.key_bits)
-            self.add_log(f"Encrypted text (hex): {encrypted.hex()}")
-        except Exception as e:
-            self.add_log(f"Error during encryption: {e}", error=True)
+    # Choose action
+    print("\nQue souhaitez-vous faire ?")
+    print("1. Chiffrer")
+    print("2. Déchiffrer")
+    action = input("Votre choix (1-2) : ").strip()
 
-    def decrypt_text(self):
-        self.set_status("Enter text to decrypt (hex).")
-        curses.curs_set(1)
-        editwin = curses.newwin(1, self.width - 4, self.height // 2, 2)
-        box = Textbox(editwin)
-        box.edit()
-        curses.curs_set(0)
+    # Choose target: text or file
+    print("Sélectionnez la cible :")
+    print("1. Texte")
+    print("2. Fichier")
+    target = input("Votre choix (1-2) : ").strip()
 
-        text = box.gather().strip()
-        self.add_log(f"Decrypting text (hex): {text}")
-
-        self.set_status("Enter decryption key (hex).")
-        keywin = curses.newwin(1, self.width - 4, self.height // 2 + 2, 2)
-        keybox = Textbox(keywin)
-        keybox.edit()
-        curses.curs_set(0)
-
-        key_hex = keybox.gather().strip()
-        self.add_log(f"Key entered (hex): {key_hex}")
-
+    if action == '1' and target == '1':  # Encrypt text
+        plain_text = input("Entrez le texte à chiffrer : ")
         try:
-            key = bytes.fromhex(key_hex)
-            if len(key) * 8 != self.key_bits:
-                raise ValueError(f"Invalid key length: Expected {self.key_bits} bits, got {len(key) * 8} bits.")
-
-            encrypted_bytes = bytes.fromhex(text)
-            decrypted = aria_decrypt(encrypted_bytes, list(key), self.key_bits)
-            self.add_log(f"Decrypted text: {decrypted}")
+            encrypted = aria_encrypt(plain_text, master_key, key_bits, rounds)
+            print(f"Texte chiffré (hex) : {encrypted.hex()}")
         except Exception as e:
-            self.add_log(f"Error during decryption: {e}", error=True)
+            print(f"Erreur lors de l'encryption : {e}")
 
-    def encrypt_file(self):
-        """Chiffrer un fichier."""
-        self.set_status("Enter input file path.")
-        curses.curs_set(1)
-        editwin = curses.newwin(1, self.width - 4, self.height // 2, 2)
-        box = Textbox(editwin)
-        box.edit()
-        curses.curs_set(0)
-
-        input_path = box.gather().strip()
-        self.add_log(f"Input file: {input_path}")
-
-        self.set_status("Enter output file path.")
-        editwin = curses.newwin(1, self.width - 4, self.height // 2 + 2, 2)
-        box = Textbox(editwin)
-        box.edit()
-        curses.curs_set(0)
-
-        output_path = box.gather().strip()
-        self.add_log(f"Output file: {output_path}")
-
+    elif action == '2' and target == '1':  # Decrypt text
+        cipher_hex = input("Entrez le texte chiffré (en hex) : ")
+        key_hex = input("Entrez la clé de déchiffrement (en hex) : ")
         try:
-            if self.key is None:
-                self.key = generate_key(self.key_bits)
-                self.add_log(f"Key generated ({self.key_bits} bits): {bytes(self.key).hex()}")
-
-            encrypt_file(input_path, output_path, self.key, self.key_bits)
-            self.add_log(f"File encrypted successfully.")
+            key_bytes = list(bytes.fromhex(key_hex))
+            if len(key_bytes) * 8 != key_bits:
+                raise ValueError(f"La clé doit être de {key_bits} bits, obtenu {len(key_bytes) * 8} bits.")
+            decrypted = aria_decrypt(bytes.fromhex(cipher_hex), key_bytes, key_bits, rounds)
+            print(f"Texte déchiffré : {decrypted}")
         except Exception as e:
-            self.add_log(f"Error during file encryption: {e}", error=True)
+            print(f"Erreur lors du déchiffrement : {e}")
 
-    def decrypt_file(self):
-        """Déchiffrer un fichier."""
-        self.set_status("Enter input file path.")
-        curses.curs_set(1)
-        editwin = curses.newwin(1, self.width - 4, self.height // 2, 2)
-        box = Textbox(editwin)
-        box.edit()
-        curses.curs_set(0)
-
-        input_path = box.gather().strip()
-        self.add_log(f"Input file: {input_path}")
-
-        self.set_status("Enter output file path.")
-        editwin = curses.newwin(1, self.width - 4, self.height // 2 + 2, 2)
-        box = Textbox(editwin)
-        box.edit()
-        curses.curs_set(0)
-
-        output_path = box.gather().strip()
-        self.add_log(f"Output file: {output_path}")
-
-        self.set_status("Enter decryption key (hex).")
-        keywin = curses.newwin(1, self.width - 4, self.height // 2 + 4, 2)
-        keybox = Textbox(keywin)
-        keybox.edit()
-        curses.curs_set(0)
-
-        key_hex = keybox.gather().strip()
-        self.add_log(f"Key entered (hex): {key_hex}")
-
+    elif action == '1' and target == '2':  # Encrypt file
+        input_file = input("Entrez le chemin du fichier source : ").strip()
+        output_file = input("Entrez le chemin du fichier de destination : ").strip()
         try:
-            key = bytes.fromhex(key_hex)
-            if len(key) * 8 != self.key_bits:
-                raise ValueError(f"Invalid key length: Expected {self.key_bits} bits, got {len(key) * 8} bits.")
-
-            decrypt_file(input_path, output_path, list(key), self.key_bits)
-            self.add_log(f"File decrypted successfully.")
+            if encrypt_file(input_file, output_file, master_key, key_bits, rounds):
+                print("Fichier chiffré avec succès.")
         except Exception as e:
-            self.add_log(f"Error during file decryption: {e}", error=True)
+            print(f"Erreur lors de l'encryption du fichier : {e}")
 
-
-def main(stdscr):
-    display_credits(stdscr)  # Affichage de la page de crédits
-    interface = AriaInterface(stdscr)
-    interface.main_loop()
+    elif action == '2' and target == '2':  # Decrypt file
+        input_file = input("Entrez le chemin du fichier source : ").strip()
+        output_file = input("Entrez le chemin du fichier de destination : ").strip()
+        key_hex = input("Entrez la clé de déchiffrement (en hex) : ").strip()
+        try:
+            key_bytes = list(bytes.fromhex(key_hex))
+            if len(key_bytes) * 8 != key_bits:
+                raise ValueError(f"La clé doit être de {key_bits} bits, obtenu {len(key_bytes) * 8} bits.")
+            if decrypt_file(input_file, output_file, key_bytes, key_bits, rounds):
+                print("Fichier déchiffré avec succès.")
+        except Exception as e:
+            print(f"Erreur lors du déchiffrement : {e}")
+    else:
+        print("Option invalide.")
 
 if __name__ == "__main__":
-    curses.wrapper(main)
+    main()
